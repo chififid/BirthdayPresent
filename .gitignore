@@ -1,0 +1,15 @@
+.telegram/
+metadata/
+__pycache__/
+
+/photo.jpg
+
+node_modules/
+.venv/
+venv/
+*.pyc
+.env
+.env.*
+!.env.example
+_site/
+.DS_Store
