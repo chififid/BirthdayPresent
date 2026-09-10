@@ -1,5 +1,5 @@
 // Pure, deterministic photo geometry: the same clock drives playback and pausing.
-export const MINI_DURATION=19.2;
+export const MINI_DURATION=14.2;
 const clamp=x=>Math.max(0,Math.min(1,x));
 const ease=x=>{x=clamp(x);return x*x*(3-2*x);};
 export function miniTimeline(t){
@@ -9,9 +9,9 @@ export function miniTimeline(t){
   surprise:ease((t-7.15)/1.1),
   arrival:ease((t-7.35)/2.5),
   open:ease((t-10.6)/1.2),
-  fade:1-ease((t-17.2)/1.6),
+  fade:1,
   finished:t>=MINI_DURATION,
-  stage:t<5?'assembly':t<6?'portrait':t<7.35?'reaction':t<10.6?'gift-arriving':t<11.8?'gift-opening':t<17.2?'confetti':'fade-out'
+  stage:t<5?'assembly':t<6?'portrait':t<7.35?'reaction':t<10.6?'gift-arriving':t<11.8?'gift-opening':t<MINI_DURATION?'confetti':'unpacking'
  };
 }
 export function movePortraitPoint(d,t,layout){

@@ -1,4 +1,6 @@
 import { MINI_DURATION, miniTimeline, movePortraitPoint, buildGiftScene, giftPhotoGeometry } from './mini-animation.js';
+import { gifts, CHOICE_REVEAL, CHOICE_BOUNDS, createChoiceLayout, choiceFrame, hitChoiceAction } from './gift-choice.js';
+import { orderPhotoLayers } from './photo-layers.js';
 const $ = s => document.querySelector(s);
 const canvas = $('#board'), ctx = canvas.getContext('2d', {alpha:false});
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -13,7 +15,12 @@ let greetingCards=[], storyTime=0, greetingCycle=0, lastGreetingLabel=-1;
 let greetingsStarted=false, greetingTime=7.8, heartReturn=1.1;
 let miniLayout=null, giftScene=null;
 let pausedScene=null, frameTiles=[], skipHold=null;
-const isExploring=()=>mode==='explore'||mode==='paused';
+let choiceLayout=null,choiceTime=0,choiceSelected=null,choiceSelectedAt=0,choiceTransition=null;
+let choiceLabels=[],choiceActions=[],choiceHover=[0,0],choiceHoverVelocity=[0,0],choiceStage='unpacking';
+const choiceImages=new Map();
+let pointerScreen={x:0,y:0,visible:false};
+const isExploring=()=>mode==='explore'||mode==='paused'||mode==='gifts';
+const inChoice=()=>mode==='gifts'||(mode==='paused'&&pausedScene?.resumeMode==='gifts');
 const heartPath=new Path2D('M0 .99 C-.22 .77 -1.15 .15 -1.02 -.48 C-.92 -1.13 -.22 -1.12 0 -.63 C.22 -1.12 .92 -1.13 1.02 -.48 C1.15 .15 .22 .77 0 .99Z');
 const greetings=[
  {text:'Happy Birthday!',font:'BirthdayPlayful',mobile:['Happy','Birthday!']},
@@ -25,6 +32,12 @@ const greetings=[
 function invalidate(){if(!animation) animation=requestAnimationFrame(draw);}
 function fit(animate=false){
  const previous={...camera};
+ if(mode==='gifts'){
+  const b=CHOICE_BOUNDS,scale=Math.max(.02,Math.min((width-45)/b.w,(height-150)/b.h));
+  camera={scale,x:(width-b.w*scale)/2,y:50+(height-150-b.h*scale)/2};
+  if(animate)glideCamera(previous);
+  updateZoom();invalidate();return;
+ }
  if(mode==='paused'&&pausedScene){
   const bounds=sceneBounds(pausedScene.tiles);
   const scale=Math.min((width-50)/bounds.w,(height-145)/bounds.h);
@@ -216,6 +229,81 @@ function pump(){
   img.src='./photos/'+encodeURIComponent(data.photos[i].file);
  }
 }
+function selectGift(id){
+ if(mode!=='gifts'||choiceTime<CHOICE_REVEAL||choiceSelected||!gifts.some(gift=>gift.id===id))return;
+ choiceSelected=id;choiceSelectedAt=choiceTime;hoverIndex=-1;fit(true);
+ for(const node of document.querySelectorAll('[data-choice],[data-choice-link]')){
+  node.hidden=(node.dataset.choice||node.dataset.choiceLink)!==id;
+ }
+ $('#choice-announcement').textContent=`Выбран подарок: ${gifts.find(gift=>gift.id===id).title}`;
+ invalidate();
+}
+for(const button of document.querySelectorAll('[data-choice]'))button.onclick=()=>selectGift(button.dataset.choice);
+function paintPhotoTiles(){
+ for(const tile of frameTiles){
+  const x=camera.x+tile.x*camera.scale,y=camera.y+tile.y*camera.scale;
+  const w=(tile.width||tile.size)*camera.scale,h=(tile.height||tile.size)*camera.scale;
+  if(tile.alpha<.002||x+w*1.5<0||y+h*1.5<0||x-w*.5>width||y-h*.5>height)continue;
+  ctx.save();ctx.globalAlpha=tile.alpha;ctx.translate(x+w/2,y+h/2);ctx.rotate(tile.angle||0);
+  if(tile.kind==='gift-image'){
+   ctx.shadowColor='#bc4e8555';ctx.shadowBlur=(25+tile.glow*75)*camera.scale;
+   ctx.drawImage(choiceImages.get(tile.giftId),-w/2,-h/2,w,h);
+  }else{
+   const i=tile.photoIndex,original=isExploring()&&w>110?originals.get(i):null;
+   if(original){
+    const crop=Math.min(original.naturalWidth,original.naturalHeight);
+    ctx.drawImage(original,(original.naturalWidth-crop)/2,(original.naturalHeight-crop)/2,crop,crop,-w/2,-h/2,w,h);
+   }else{
+    const source=data.photos[i].atlasIndex;
+    ctx.drawImage(atlas,(source%data.columns)*data.cell,Math.floor(source/data.columns)*data.cell,data.cell,data.cell,-w/2,-h/2,w,h);
+   }
+   if(isExploring()&&w>110){visibleOriginals.add(i);loadOriginal(i);}
+  }
+  if(tile.tint){ctx.fillStyle=tile.tint==='ribbon'?'#e598b884':'#49283775';ctx.fillRect(-w/2,-h/2,w,h);}
+  ctx.restore();
+ }
+}
+function drawChoice(dt,changing){
+ if(mode==='gifts'){
+  if(!document.hidden)choiceTime+=dt/1000;
+  const action=pointerScreen.visible&&!pointers.size?hitChoiceAction(choiceActions,
+   (pointerScreen.x-camera.x)/camera.scale,(pointerScreen.y-camera.y)/camera.scale):null;
+  choiceHover=choiceHover.map((value,index)=>{
+   const target=action?.giftId===gifts[index].id?1:0;
+   if(reduced){choiceHoverVelocity[index]=0;return target;}
+   const t=dt/1000,omega=13,decay=Math.exp(-omega*t),delta=value-target;
+   const velocity=choiceHoverVelocity[index],c=velocity+omega*delta;
+   choiceHoverVelocity[index]=(velocity-omega*c*t)*decay;
+   return target+(delta+c*t)*decay;
+  });
+  const pointer={x:(pointerScreen.x-camera.x)/camera.scale,y:(pointerScreen.y-camera.y)/camera.scale,
+   cell:5.2/camera.scale,visible:pointerScreen.visible};
+  const frame=choiceFrame(choiceLayout,{time:choiceTime,hover:choiceHover,
+   selected:choiceSelected,selectedAt:choiceSelectedAt,pointer,reduced,transition:choiceTransition});
+  if(choiceTransition){
+   const particles=giftPhotoGeometry(choiceTransition.sourceScene,choiceTransition.elapsed+choiceTime).filter(tile=>tile.kind==='confetti');
+   frame.tiles.push(...particles.map(tile=>projectTransitionTile(tile,choiceTransition)));
+   orderPhotoLayers(frame.tiles);
+  }
+  frameTiles=frame.tiles;choiceLabels=frame.labels;choiceActions=frame.actions;
+  if(choiceStage!==frame.stage){
+   choiceStage=frame.stage;syncExploreUI();
+   canvas.setAttribute('aria-label',choiceStage==='selected'?'Выбранный подарок и конфетти':'Слева конная прогулка, справа подводная фотосессия');
+   if(choiceStage==='options')$('#choice-announcement').textContent='Слева конная прогулка, справа подводная фотосессия. Скрепки открывают сайты подарков.';
+  }
+ }else{
+  frameTiles=pausedScene.tiles;choiceLabels=pausedScene.labels;choiceActions=pausedScene.actions;
+ }
+ paintPhotoTiles();
+ if(mode==='paused'&&hoverIndex>=0&&frameTiles[hoverIndex]){
+  const tile=frameTiles[hoverIndex];
+  ctx.save();ctx.translate(camera.x+(tile.x+(tile.width||tile.size)/2)*camera.scale,camera.y+(tile.y+(tile.height||tile.size)/2)*camera.scale);
+  ctx.rotate(tile.angle||0);ctx.strokeStyle='#fff5fa';ctx.lineWidth=2;
+  ctx.strokeRect(-(tile.width||tile.size)*camera.scale/2,-(tile.height||tile.size)*camera.scale/2,(tile.width||tile.size)*camera.scale,(tile.height||tile.size)*camera.scale);ctx.restore();
+ }
+ for(const i of originals.keys()){if(originals.size<=48)break;if(!visibleOriginals.has(i))originals.delete(i);}
+ if(changing||(mode==='gifts'&&!document.hidden))invalidate();
+}
 function draw(time){
  animation=0;const dt=Math.min(64,time-(lastTime||time));lastTime=time;
  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.globalAlpha=1;ctx.fillStyle=backdrop||'#f5dce5';ctx.fillRect(0,0,width,height);
@@ -227,13 +315,13 @@ function draw(time){
   if(progress===1)cameraMotion=null;else changing=true;
   updateZoom();
  }
+ if(inChoice()){drawChoice(dt,changing);return;}
  if(mode==='heart'&&!document.hidden){
   storyTime+=dt/1000;
   if(greetingsStarted)greetingTime+=dt/1000;
   else heartReturn=Math.min(1.1,heartReturn+dt/1000);
   if(greetingsStarted&&greetingTime>=greetingCycle+MINI_DURATION){
-   greetingsStarted=false;greetingTime=7.8;storyTime=0;heartReturn=0;
-   brightness.fill(.04);lastGreetingLabel=-1;
+   showGiftChoice(true);return;
   }
  }
  const portraitScene=mode==='heart'&&greetingsStarted&&portrait&&greetingTime>=greetingCycle;
@@ -290,16 +378,8 @@ function draw(time){
   const tint=frozen?frozen.tint:extra?.tint;
   const kind=frozen?frozen.kind:extra?extra.kind:portraitScene?'portrait':'grid';
   frameTiles[i]={x:(x-camera.x)/camera.scale,y:(y-camera.y)/camera.scale,size:drawSize/camera.scale,alpha,photoIndex,angle,tint,kind};
-  if(x+drawSize*1.5<0||y+drawSize*1.5<0||x-drawSize*.5>width||y-drawSize*.5>height||alpha<.002)continue;
-  ctx.save();ctx.globalAlpha=alpha;
-  ctx.translate(x+drawSize/2,y+drawSize/2);ctx.rotate(angle);
-  const original=isExploring()&&drawSize>110?originals.get(photoIndex):null;
-  if(original){const crop=Math.min(original.naturalWidth,original.naturalHeight);ctx.drawImage(original,(original.naturalWidth-crop)/2,(original.naturalHeight-crop)/2,crop,crop,-drawSize/2,-drawSize/2,drawSize,drawSize);}
-  else {const source=data.photos[photoIndex].atlasIndex;ctx.drawImage(atlas,(source%data.columns)*data.cell,Math.floor(source/data.columns)*data.cell,data.cell,data.cell,-drawSize/2,-drawSize/2,drawSize,drawSize);}
-  if(tint){ctx.fillStyle=tint==='ribbon'?'#e598b884':'#49283775';ctx.fillRect(-drawSize/2,-drawSize/2,drawSize,drawSize);}
-  ctx.restore();
-  if(isExploring()&&drawSize>110){visibleOriginals.add(photoIndex);loadOriginal(photoIndex);}
  }
+ frameTiles=orderPhotoLayers(frameTiles);paintPhotoTiles();
  if(portraitScene&&lastGreetingLabel!==miniState.stage){canvas.setAttribute('aria-label',`Портрет и подарок: ${miniState.stage}`);lastGreetingLabel=miniState.stage;}
  if(!portraitScene&&!greeting&&mode==='heart'&&lastGreetingLabel!==-2){canvas.setAttribute('aria-label','Пульсирующее сердце из наших фотографий');lastGreetingLabel=-2;}
  const hoverTarget=isExploring()&&hoverIndex>=0?1:0;
@@ -318,25 +398,32 @@ function draw(time){
 }
 function sceneBounds(tiles){
  const boxes=tiles.map(tile=>{
-  const angle=tile.angle||0,padding=tile.size*(Math.abs(Math.cos(angle))+Math.abs(Math.sin(angle))-1)/2;
-  return {x:tile.x-padding,y:tile.y-padding,size:tile.size+padding*2};
+  const angle=tile.angle||0,w=tile.width||tile.size,h=tile.height||tile.size;
+  const bw=w*Math.abs(Math.cos(angle))+h*Math.abs(Math.sin(angle)),bh=h*Math.abs(Math.cos(angle))+w*Math.abs(Math.sin(angle));
+  return {x:tile.x+(w-bw)/2,y:tile.y+(h-bh)/2,w:bw,h:bh};
  });
  const x=Math.min(...boxes.map(p=>p.x)),y=Math.min(...boxes.map(p=>p.y));
- return {x,y,w:Math.max(...boxes.map(p=>p.x+p.size))-x,h:Math.max(...boxes.map(p=>p.y+p.size))-y};
+ return {x,y,w:Math.max(...boxes.map(p=>p.x+p.w))-x,h:Math.max(...boxes.map(p=>p.y+p.h))-y};
 }
 function syncExploreUI(){
  const active=isExploring();
  document.body.classList.toggle('exploring',active);
- $('#explore-controls').hidden=!active;$('#explore-hint').hidden=!active;$('#explore').hidden=active;
+ document.body.classList.toggle('choice-live',mode==='gifts');
+ $('#explore-controls').hidden=!active;$('#explore-hint').hidden=!active||inChoice();$('#explore').hidden=active||mode==='gifts';
  $('#explore-hint').textContent=mode==='paused'
   ? 'Пауза · Исследуй сцену · Пробел — продолжить'
+  : mode==='gifts'?'Выбери фотографию · Скрепка — сайт · Пробел — стоп'
   : 'Перетаскивай доску · Приближай колёсиком или двумя пальцами · Нажми на фото';
- $('#fit').textContent=mode==='paused'?'Вся сцена':'Вся доска';
+ $('#fit').textContent=inChoice()||mode==='paused'?'Вся сцена':'Вся доска';
+ $('#scene-pause').hidden=mode!=='paused'&&mode!=='gifts';
+ $('#scene-pause').textContent=mode==='paused'?'Продолжить':'Стоп';
+ $('#choice-accessibility').hidden=!inChoice()||choiceTime<CHOICE_REVEAL;
 }
 function pauseScene(){
- if(mode!=='heart'||!frameTiles.length)return;
+ if((mode!=='heart'&&mode!=='gifts')||!frameTiles.length)return;
  cancelSkip();
- pausedScene={tiles:frameTiles.map(tile=>({...tile})),camera:{...camera}};
+ pausedScene={tiles:frameTiles.map(tile=>({...tile})),camera:{...camera},resumeMode:mode,
+  labels:choiceLabels.map(label=>({...label})),actions:choiceActions.map(action=>({...action}))};
  cameraMotion=null;mode='paused';hoverIndex=-1;pointers.clear();gesture=null;
  syncExploreUI();lastTime=0;invalidate();
 }
@@ -344,7 +431,7 @@ function resumeScene(){
  if(mode!=='paused')return;
  if(viewer.open){++photoRequest;clearTimeout(closeTimer);viewer.classList.remove('is-visible');viewer.close();closing=false;}
  const previous={...camera},saved=pausedScene.camera;
- mode='heart';camera={...saved};pausedScene=null;hoverIndex=-1;pointers.clear();gesture=null;
+ mode=pausedScene.resumeMode;camera={...saved};pausedScene=null;hoverIndex=-1;pointers.clear();gesture=null;
  glideCamera(previous);syncExploreUI();lastTime=0;invalidate();
 }
 function hitPhoto(x,y){
@@ -353,9 +440,10 @@ function hitPhoto(x,y){
  for(let i=frameTiles.length-1;i>=0;i--){
   const tile=frameTiles[i];
   if(tile.alpha<.002)continue;
-  const dx=wx-tile.x-tile.size/2,dy=wy-tile.y-tile.size/2;
+  const w=tile.width||tile.size,h=tile.height||tile.size;
+  const dx=wx-tile.x-w/2,dy=wy-tile.y-h/2;
   const angle=tile.angle||0,tx=dx*Math.cos(angle)+dy*Math.sin(angle),ty=-dx*Math.sin(angle)+dy*Math.cos(angle);
-  if(Math.abs(tx)<=tile.size/2&&Math.abs(ty)<=tile.size/2)return i;
+  if(Math.abs(tx)<=w/2&&Math.abs(ty)<=h/2)return i;
  }
  return -1;
 }
@@ -376,17 +464,41 @@ function startSkip(e){
 }
 function setMode(next){
  cancelSkip();
- if(next==='heart'&&isExploring()){
+ if(next==='heart'&&(isExploring()||mode==='gifts')){
   greetingsStarted=false;
   greetingTime=7.8;
   storyTime=0;heartReturn=1.1;
   lastTime=0;
   lastGreetingLabel=-1;
  }
+ if(inChoice()){$('#choice-accessibility').hidden=true;$('#choice-announcement').textContent='';}
  pausedScene=null;mode=next;syncExploreUI();
  hoverIndex=-1;fit(true);
  target=data.photos.map((_,i)=>next==='explore'?1:.065+.7*heartFrames[0][i]);
  invalidate();
+}
+function projectTransitionTile(tile,transition){
+ const {from,to}=transition,ratio=from.scale/to.scale;
+ return {...tile,x:(from.x+tile.x*from.scale-to.x)/to.scale,
+  y:(from.y+tile.y*from.scale-to.y)/to.scale,size:tile.size*ratio};
+}
+function showGiftChoice(fromBox=false){
+ const sourceTiles=fromBox?frameTiles.filter(tile=>tile.kind!=='confetti').map(tile=>({...tile})):[];
+ const from={...camera},elapsed=greetingTime-greetingCycle;
+ cancelSkip();cameraMotion=null;pausedScene=null;hoverIndex=-1;
+ pointers.clear();gesture=null;frameTiles=[];
+ mode='gifts';greetingsStarted=false;choiceTime=0;choiceSelected=null;choiceSelectedAt=0;
+ choiceHover=[0,0];choiceHoverVelocity=[0,0];choiceStage='unpacking';choiceLabels=[];choiceActions=[];choiceTransition=null;lastTime=0;
+ for(const node of document.querySelectorAll('[data-choice],[data-choice-link]'))node.hidden=false;
+ canvas.setAttribute('aria-label','Два подарка появляются из открытой коробки');
+ $('#choice-announcement').textContent='Конная прогулка или подводная фотосессия';
+ fit();
+ if(fromBox){
+  choiceTransition={from,to:{...camera},sourceScene:giftScene,elapsed};
+  choiceTransition.sources=sourceTiles.map(tile=>projectTransitionTile(tile,choiceTransition));
+  choiceTransition.origin=projectTransitionTile({x:giftScene.centerX,y:giftScene.centerY,size:0},choiceTransition);
+ }
+ syncExploreUI();invalidate();
 }
 function updateZoom(){$('#zoom-value').textContent=Math.round(camera.scale/fitScale*100)+'%';}
 function glideCamera(previous){
@@ -397,15 +509,15 @@ function zoom(factor,x=width/2,y=height/2,smooth=true){
  const previous={...camera};
  if(smooth&&cameraMotion)camera={...cameraMotion.to};
  cameraMotion=null;
- const minimum=mode==='paused'?Math.min(fitScale*.3,pausedScene.camera.scale*.6):fitScale*.8;
+ const minimum=mode==='paused'?Math.min(fitScale*.3,pausedScene.camera.scale*.6):mode==='gifts'?.02:fitScale*.8;
  const next=Math.max(minimum,Math.min(fitScale*(mode==='paused'?60:24),camera.scale*factor));
  camera.x=x-(x-camera.x)*next/camera.scale;camera.y=y-(y-camera.y)*next/camera.scale;camera.scale=next;
  constrain();if(smooth)glideCamera(previous);updateZoom();invalidate();
 }
 function constrain(){
  const margin=80;
- if(mode==='paused'){
-  const b=sceneBounds(pausedScene.tiles);
+ if(mode==='paused'||mode==='gifts'){
+  const b=mode==='paused'?sceneBounds(pausedScene.tiles):CHOICE_BOUNDS;
   camera.x=Math.min(width-margin-b.x*camera.scale,Math.max(margin-(b.x+b.w)*camera.scale,camera.x));
   camera.y=Math.min(height-margin-b.y*camera.scale,Math.max(margin-(b.y+b.h)*camera.scale,camera.y));
   return;
@@ -415,6 +527,7 @@ function constrain(){
 }
 $('#explore').onclick=()=>setMode('explore');
 $('#back').onclick=()=>setMode('heart');
+$('#scene-pause').onclick=()=>mode==='paused'?resumeScene():pauseScene();
 $('#fit').onclick=()=>fit(true);$('#zoom-in').onclick=()=>zoom(1.5);$('#zoom-out').onclick=()=>zoom(1/1.5);
 canvas.addEventListener('wheel',e=>{if(!isExploring())return;e.preventDefault();zoom(Math.exp(-e.deltaY*.0015),e.clientX,e.clientY);},{passive:false});
 const pointers=new Map();let gesture=null,moved=false,down=null;
@@ -428,6 +541,8 @@ canvas.addEventListener('pointerdown',e=>{
  gesture=pinch();
 });
 canvas.addEventListener('pointermove',e=>{
+ pointerScreen={x:e.clientX,y:e.clientY,visible:e.pointerType!=='touch'};
+ if(mode==='gifts')invalidate();
  if(skipHold&&Math.hypot(e.clientX-skipHold.x,e.clientY-skipHold.y)>10)cancelSkip();
  if(isExploring()&&!pointers.size){hoverIndex=hitPhoto(e.clientX,e.clientY);invalidate();}
  if(!pointers.has(e.pointerId))return;
@@ -443,10 +558,17 @@ canvas.addEventListener('pointerup',e=>{
  if(!pointers.has(e.pointerId))return;
  pointers.delete(e.pointerId);gesture=pinch();
  if(!moved&&pointers.size===0){
-  const i=hitPhoto(e.clientX,e.clientY);if(i>=0)openPhoto(frameTiles[i].photoIndex);
+  const i=hitPhoto(e.clientX,e.clientY);
+  if(inChoice()){
+   const action=hitChoiceAction(choiceActions,(e.clientX-camera.x)/camera.scale,(e.clientY-camera.y)/camera.scale);
+   const cursor=mode==='paused'&&i>=0&&frameTiles[i].kind==='choice-cursor';
+   if(!cursor&&action?.type==='link'){window.open(gifts.find(gift=>gift.id===action.giftId).url,'_blank','noopener,noreferrer');return;}
+   if(mode==='gifts'&&action?.type==='choose'){selectGift(action.giftId);return;}
+  }
+  if(i>=0&&frameTiles[i].photoIndex!==null){if(mode==='gifts')pauseScene();openPhoto(frameTiles[i].photoIndex);}
  }
 });
-canvas.addEventListener('pointerleave',()=>{cancelSkip();hoverIndex=-1;invalidate();});
+canvas.addEventListener('pointerleave',()=>{pointerScreen.visible=false;cancelSkip();hoverIndex=-1;invalidate();});
 canvas.addEventListener('pointercancel',e=>{cancelSkip();pointers.delete(e.pointerId);gesture=null;moved=true;});
 let photoRequest=0, closeTimer, closing=false;
 const viewer=$('#viewer'), photoStage=$('.photo-stage');
@@ -494,7 +616,7 @@ viewer.addEventListener('click',e=>{if(e.target===viewer){const r=viewer.getBoun
 addEventListener('keydown',e=>{
  if(e.code==='Space'||e.key===' '){
   e.preventDefault();if(e.repeat)return;
-  if(mode==='paused')resumeScene();else if(mode==='heart')pauseScene();
+  if(mode==='paused')resumeScene();else if(mode==='heart'||mode==='gifts')pauseScene();
   return;
  }
  if(mode==='heart'&&!viewer.open&&!greetingsStarted){
@@ -524,9 +646,12 @@ try{
  for(let i=data.photos.length-1;i>0;i--){const j=Math.floor(random()*(i+1));[data.photos[i],data.photos[j]]=[data.photos[j],data.photos[i]];}
  atlas=new Image();atlas.src='./assets/atlas.webp';await atlas.decode();
  await Promise.all([document.fonts.load('700 48px BirthdayPlayful'),document.fonts.load('700 48px BirthdayRounded'),document.fonts.load('700 48px BirthdayChinese')]);
- $('#explore').disabled=false;started=performance.now();resize();
+ started=performance.now();resize();
+ await Promise.all(gifts.map(async gift=>{const image=new Image();image.src=gift.image;await image.decode();choiceImages.set(gift.id,image);}));
+ choiceLayout=createChoiceLayout(data.photos.length);$('#explore').disabled=false;
  if(new URLSearchParams(location.search).get('scene')==='portrait'){greetingsStarted=true;greetingTime=greetingCycle;invalidate();}
+ if(new URLSearchParams(location.search).get('scene')==='gifts')showGiftChoice();
 }catch(error){$('#error').hidden=false;console.error(error);}
 
-function playbackState(){return {mode,greetingsStarted,greetingTime,greetingCycle,storyTime,camera:{...camera},tiles:frameTiles.map(tile=>({...tile})),pausedCamera:pausedScene?.camera,mini:greetingsStarted&&greetingTime>=greetingCycle?miniTimeline(greetingTime-greetingCycle):null,featureCounts:{pupils:portraitDestinations.filter(p=>p.pupil).length,eyePoints:portraitDestinations.filter(p=>p.eye).length}};}
+function playbackState(){return {mode,greetingsStarted,greetingTime,greetingCycle,storyTime,camera:{...camera},tiles:frameTiles.map(tile=>({...tile})),pausedCamera:pausedScene?.camera,mini:greetingsStarted&&greetingTime>=greetingCycle?miniTimeline(greetingTime-greetingCycle):null,giftChoice:{time:choiceTime,stage:choiceStage,selected:choiceSelected,hover:[...choiceHover],labels:choiceLabels,actions:choiceActions},featureCounts:{pupils:portraitDestinations.filter(p=>p.pupil).length,eyePoints:portraitDestinations.filter(p=>p.eye).length}};}
 export { greetingAt, greetingCards, portraitGeometry, playbackState };

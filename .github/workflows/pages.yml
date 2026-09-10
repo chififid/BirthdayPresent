@@ -18,7 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Check animation logic
-        run: node scripts/check_mini_geometry.mjs
+        run: |
+          node scripts/check_mini_geometry.mjs
+          node scripts/check_choice_geometry.mjs
       - name: Assemble website and photos
         run: python3 scripts/build_pages.py
       - uses: actions/upload-pages-artifact@v4

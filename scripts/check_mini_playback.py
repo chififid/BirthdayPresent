@@ -1,6 +1,7 @@
 """Browser state/interaction validation. No screenshots or visual inspection."""
-import json,time,urllib.request,websocket
-pages=json.load(urllib.request.urlopen('http://127.0.0.1:9341/json/list'))
+import json,time,urllib.request,websocket,os,math
+port=os.environ.get('BIRTHDAY_DEBUG_PORT','9341')
+pages=json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list'))
 w=websocket.create_connection(pages[0]['webSocketDebuggerUrl'],suppress_origin=True)
 n=0;errors=[]
 def send(method,params={}):
@@ -47,10 +48,18 @@ time.sleep(.9);space();time.sleep(.1);s=state()
 assert s['mode']=='paused'
 confetti=[(i,t) for i,t in enumerate(s['tiles']) if t['kind']=='confetti']
 assert len(confetti)>150
+assert max(i for i,t in confetti)<next(i for i,t in enumerate(s['tiles']) if t['kind']=='portrait')
 cam=s['camera'];candidates=[]
 for i,t in confetti:
  x=cam['x']+(t['x']+t['size']/2)*cam['scale'];y=cam['y']+(t['y']+t['size']/2)*cam['scale']
- if 30<x<1410 and 90<y<840 and t['alpha']>.2:candidates.append((i,t,x,y))
+ if not (30<x<1410 and 90<y<840 and t['alpha']>.2):continue
+ wx=t['x']+t['size']/2;wy=t['y']+t['size']/2
+ covered=False
+ for front in s['tiles'][i+1:]:
+  dx=wx-front['x']-front['size']/2;dy=wy-front['y']-front['size']/2;angle=front.get('angle',0)
+  tx=dx*math.cos(angle)+dy*math.sin(angle);ty=-dx*math.sin(angle)+dy*math.cos(angle)
+  if front['alpha']>=.002 and abs(tx)<=front['size']/2 and abs(ty)<=front['size']/2:covered=True;break
+ if not covered:candidates.append((i,t,x,y))
 assert candidates
 _,tile,x,y=candidates[-1]
 mouse('mousePressed',x,y);mouse('mouseReleased',x,y);time.sleep(.5)
@@ -61,7 +70,11 @@ a=state();mouse('mousePressed');time.sleep(1.2);mouse('mouseReleased');b=state()
 assert b['greetingTime']>a['greetingTime'],'Holding mouse must not restart mini scene'
 until(lambda s:not s['greetingsStarted'],seconds=12)
 time.sleep(.5);s=state()
-assert s['mode']=='heart' and len(s['tiles'])==800 and s['mini'] is None
+assert s['mode']=='gifts' and s['mini'] is None
+assert s['giftChoice']['stage'] in ['unpacking','options']
+assert s['giftChoice']['labels']==[]
+assert any(t['kind']=='gift-image' for t in s['tiles'])
+assert all(t['alpha']==1 for t in s['tiles'] if t['kind']=='gift-image')
 assert not errors,errors
-print('Passed: actual mini playback, gaze tagging, gift/lid, confetti photo opening, unchanged paused brightness, skip guard and return to heart. No screenshots.')
+print('Passed: actual mini playback, gaze tagging, gift/lid, confetti photo opening, unchanged paused brightness, skip guard and gift selection finale. No screenshots.')
 w.close()
